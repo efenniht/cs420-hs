@@ -164,6 +164,140 @@ p_program = spaces *> many p_func
 
 parseProgram = parse p_program ""
 --------------------------------------------------------------------------------
+-- Evaluation
+
+type Env = [(String, Value)]
+
+newtype Evaluation r = Evaluation {
+  runEval :: [Fun] -> Env -> (r, Env)
+}
+
+data Value = ValueInt Int | ValueDouble Double
+
+instance (Monad m) => Evaluation m where
+  return :: a -> Evaluation a
+  return r = Evaluation $ \_ -> \e -> (r, e)
+
+  bind :: Evaluation a -> (a -> Evaluation b) -> Evaluation b
+  bind e f = Evaluation $ \fs -> \env ->
+    runEval (f a) fs newenv where
+      (a, newenv) = runEval e fs env
+
+run :: [Fun] -> Int
+
+run funs = let 
+  main_funcs = filter (\f. name f == "main") funs in
+  if len main_funcs == 1 then
+    evalf . getStmts . car main_funcs
+  else
+    error "There are 0 or more than one main functions."
+
+evalf :: [Stmt] -> Evaluation Value
+evalf (Return expr) :: _ = evale expr
+
+lookup :: String -> Env -> Value
+lookup x [] = error "No variable found"
+lookup x (y,v):xs = if x == y then v else lookup x xs
+
+update :: String -> Value -> Env -> Env
+update x v [] = []
+update x v (y,w):xs = if x == y 
+  then (y,v):xs
+  else update x w xs
+
+v2d :: Value -> Double
+v2d (ValueInt i) = fromIntegral i
+v2d (ValueDouble d) = d
+
+evale :: Expr -> Evaluation Value
+evale (Var v) = Evaluation $ (\_ -> \e -> (lookup v e, e))
+
+evale (LitI i) = return . ValueInt i
+evale (LitF d) = return . ValueDouble d
+evale (Add e1 e2) = do
+  v1 <- evale e1
+  v2 <- evale e2
+  case v1, v2 of
+    (ValueInt i1, ValueInt i2) -> ValueInt (i1 + i2)
+    _, _ => ValueDouble (v2d v1 + v2d v2)
+
+evale (Sub e1 e2) = do
+  v1 <- evale e1
+  v2 <- evale e2
+  case v1, v2 of
+    (ValueInt i1, ValueInt i2) -> ValueInt (i1 - i2)
+    _, _ => ValueDouble (v2d v1 - v2d v2)
+
+evale (Mul e1 e2) = do
+  v1 <- evale e1
+  v2 <- evale e2
+  case v1, v2 of
+    (ValueInt i1, ValueInt i2) -> ValueInt (i1 * i2)
+    _, _ => ValueDouble (v2d v1 * v2d v2)
+
+evale (Div e1 e2) = do
+  v1 <- evale e1
+  v2 <- evale e2
+  case v1, v2 of
+    (ValueInt i1, ValueInt i2) ->
+      if i2 == 0
+        then error "Zero division!"
+        else ValueInt (i1 / i2)
+    _, _ => ValueDouble (v2d v1 / v2d v2)
+
+inc :: Value -> Value
+inc (ValueInt i) = ValueInt (i + 1)
+inc _ = error "you cannot increase noninteger."
+
+evale (Inc e) = do
+  x <- evale_lval e
+  v <- evale x
+  Evaluation $ \_ -> \env -> (v, update (name x) (inc v) env)
+
+evale (Assgn l r) = do
+  x <- evale_lval l
+  v <- evale r
+  Evaluation $ \_ -> \env -> (v, update (name x) v env)
+
+evale (Lt e1 e2) = do
+  v1 <- evale e1
+  v2 <- evale e2
+  let b = case v1, v2 of
+    (ValueInt i1, ValueInt i2) -> i1 < i2
+    _, _ -> v2d v1 < v2d v2 in
+  if b then ValueInt 1 else ValueInt 0
+
+evale (Gt e1 e2) = do
+  v1 <- evale e1
+  v2 <- evale e2
+  let b = case v1, v2 of
+    (ValueInt i1, ValueInt i2) -> i1 > i2
+    _, _ -> v2d v1 > v2d v2 in
+  if b then ValueInt 1 else ValueInt 0
+
+buildEnv :: [(Type, String)] -> [Value] -> Env
+buildEnv a b = do
+  (t, s) <- a
+  v <- b
+  return (s, v)
+
+call :: [Stmt] -> Env -> Evaluation Value
+call body callenv = Evaluation $ \fs -> \env -> 
+  runEval e fs (callenv:env) where
+    e = evalf body
+
+evale (Call fname args) = do 
+  vargs <- forM args evale
+  Evaluation $ \fs -> \env ->
+    let filtered = filter (\f -> (name f) == fname) fs in
+    if (len filtered) != 1
+      then error "No such function"
+      else
+        let f = car filtered in
+        let callenv = buildEnv (arguments f) vargs in
+        let e = evalf body in
+          runEval e fs (callenv:env)
+
 ex_program = "int avg(int count, int *value) {\n\
 \  int i, total;;\n\
 \  for (i = 1; i < count; i++) {\n\
